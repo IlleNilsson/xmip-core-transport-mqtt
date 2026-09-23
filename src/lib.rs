@@ -12,7 +12,7 @@
 //!
 //! What is here is MQTT 3.1.1 at `QoS` 0 and 1. `QoS` 2 is a Journey's
 //! exactly-once wearing a packet's clothes (ADR-0013 4c) and is not spoken.
-//! TLS is `xmip-core-tls`'s, per ADR-0033, and joins here when it
+//! TLS is `xmip-core-library-tls`'s, per ADR-0033, and joins here when it
 //! reaches the socket.
 //!
 //! The origin URI carries what the packet knew:

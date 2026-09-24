@@ -1,5 +1,8 @@
 //! MQTT 3.1.1 control packets: the fixed header, the remaining-length
-//! encoding, and the seven packets a Location meets.
+//! encoding, and the seven packets a Location meets. A body is read and
+//! written through codec's byte cursor and writer; MQTT's length-prefixed
+//! string and binary data are [`Mqtt`] and [`MqttWrite`] over them, and
+//! the remaining length is codec's varint.
 //!
 //! What is not here: wills, retained-message state, `QoS` 2's four-way
 //! handshake. A Location publishes at `QoS` 0 or 1 and subscribes at the same;
@@ -7,6 +10,8 @@
 
 use std::io::Read;
 
+use codec::cursor::Cursor;
+use codec::writer::ByteWriter;
 use transport::error::{Result, classify, protocol_error};
 
 /// The most a remaining length may say: four bytes of seven bits.
@@ -64,8 +69,7 @@ pub fn encode(packet: &Packet) -> Result<Vec<u8>> {
             password,
             keep_alive,
         } => {
-            string(&mut body, "MQTT")?;
-            body.push(4);
+            body.string("MQTT")?.byte(4);
             let mut flags = 0x02;
             if username.is_some() {
                 flags |= 0x80;
@@ -73,14 +77,12 @@ pub fn encode(packet: &Packet) -> Result<Vec<u8>> {
             if password.is_some() {
                 flags |= 0x40;
             }
-            body.push(flags);
-            body.extend_from_slice(&keep_alive.to_be_bytes());
-            string(&mut body, client_id)?;
+            body.byte(flags).u16_be(*keep_alive).string(client_id)?;
             if let Some(name) = username {
-                string(&mut body, name)?;
+                body.string(name)?;
             }
             if let Some(secret) = password {
-                bytes(&mut body, secret)?;
+                body.binary(secret)?;
             }
             0x10
         }
@@ -88,33 +90,30 @@ pub fn encode(packet: &Packet) -> Result<Vec<u8>> {
             session_present,
             code,
         } => {
-            body.push(u8::from(*session_present));
-            body.push(*code);
+            body.byte(u8::from(*session_present)).byte(*code);
             0x20
         }
         Packet::Publish(publish) => {
-            string(&mut body, &publish.topic)?;
+            body.string(&publish.topic)?;
             if publish.qos > 0 {
-                body.extend_from_slice(&publish.id.unwrap_or(1).to_be_bytes());
+                body.u16_be(publish.id.unwrap_or(1));
             }
-            body.extend_from_slice(&publish.payload);
+            body.bytes(&publish.payload);
             0x30 | (publish.qos.min(2) << 1) | u8::from(publish.retain)
         }
         Packet::PubAck(id) => {
-            body.extend_from_slice(&id.to_be_bytes());
+            body.u16_be(*id);
             0x40
         }
         Packet::Subscribe { id, filters } => {
-            body.extend_from_slice(&id.to_be_bytes());
+            body.u16_be(*id);
             for (filter, qos) in filters {
-                string(&mut body, filter)?;
-                body.push(*qos);
+                body.string(filter)?.byte(*qos);
             }
             0x82
         }
         Packet::SubAck { id, codes } => {
-            body.extend_from_slice(&id.to_be_bytes());
-            body.extend_from_slice(codes);
+            body.u16_be(*id).bytes(codes);
             0x90
         }
         Packet::PingReq => 0xc0,
@@ -124,20 +123,10 @@ pub fn encode(packet: &Packet) -> Result<Vec<u8>> {
     if body.len() > MAX_REMAINING {
         return Err(protocol_error("a packet over what MQTT can frame"));
     }
+    // The remaining length is a varint of at most four bytes, which
+    // MAX_REMAINING holds it to.
     let mut out = vec![head];
-    let mut remaining = body.len();
-    loop {
-        let mut byte = u8::try_from(remaining % 128).unwrap_or(0);
-        remaining /= 128;
-        if remaining > 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if remaining == 0 {
-            break;
-        }
-    }
-    out.extend_from_slice(&body);
+    out.varint(body.len() as u64).bytes(&body);
     Ok(out)
 }
 
@@ -178,28 +167,28 @@ pub fn read(reader: &mut impl Read) -> Result<Option<Packet>> {
 }
 
 fn decode(head: u8, body: &[u8]) -> Result<Packet> {
-    let mut at = 0usize;
+    let mut cursor = Cursor::new(body);
     match head >> 4 {
         1 => {
-            let name = take_string(body, &mut at)?;
-            let level = take_u8(body, &mut at)?;
+            let name = cursor.string()?;
+            let level = cursor.byte()?;
             if name != "MQTT" || level != 4 {
                 return Err(protocol_error("a CONNECT that is not MQTT 3.1.1"));
             }
-            let flags = take_u8(body, &mut at)?;
-            let keep_alive = take_u16(body, &mut at)?;
-            let client_id = take_string(body, &mut at)?;
+            let flags = cursor.byte()?;
+            let keep_alive = cursor.u16_be()?;
+            let client_id = cursor.string()?;
             if flags & 0x04 != 0 {
-                take_string(body, &mut at)?;
-                take_bytes(body, &mut at)?;
+                cursor.string()?;
+                cursor.binary()?;
             }
             let username = if flags & 0x80 != 0 {
-                Some(take_string(body, &mut at)?)
+                Some(cursor.string()?)
             } else {
                 None
             };
             let password = if flags & 0x40 != 0 {
-                Some(take_bytes(body, &mut at)?)
+                Some(cursor.binary()?.to_vec())
             } else {
                 None
             };
@@ -211,14 +200,14 @@ fn decode(head: u8, body: &[u8]) -> Result<Packet> {
             })
         }
         2 => Ok(Packet::ConnAck {
-            session_present: take_u8(body, &mut at)? & 1 == 1,
-            code: take_u8(body, &mut at)?,
+            session_present: cursor.byte()? & 1 == 1,
+            code: cursor.byte()?,
         }),
         3 => {
             let qos = (head >> 1) & 0x03;
-            let topic = take_string(body, &mut at)?;
+            let topic = cursor.string()?;
             let id = if qos > 0 {
-                Some(take_u16(body, &mut at)?)
+                Some(cursor.u16_be()?)
             } else {
                 None
             };
@@ -227,22 +216,22 @@ fn decode(head: u8, body: &[u8]) -> Result<Packet> {
                 qos,
                 retain: head & 1 == 1,
                 id,
-                payload: body[at..].to_vec(),
+                payload: cursor.take_rest().to_vec(),
             }))
         }
-        4 => Ok(Packet::PubAck(take_u16(body, &mut at)?)),
+        4 => Ok(Packet::PubAck(cursor.u16_be()?)),
         8 => {
-            let id = take_u16(body, &mut at)?;
+            let id = cursor.u16_be()?;
             let mut filters = Vec::new();
-            while at < body.len() {
-                let filter = take_string(body, &mut at)?;
-                filters.push((filter, take_u8(body, &mut at)?));
+            while !cursor.is_empty() {
+                let filter = cursor.string()?;
+                filters.push((filter, cursor.byte()?));
             }
             Ok(Packet::Subscribe { id, filters })
         }
         9 => Ok(Packet::SubAck {
-            id: take_u16(body, &mut at)?,
-            codes: body[at..].to_vec(),
+            id: cursor.u16_be()?,
+            codes: cursor.take_rest().to_vec(),
         }),
         12 => Ok(Packet::PingReq),
         13 => Ok(Packet::PingResp),
@@ -253,45 +242,59 @@ fn decode(head: u8, body: &[u8]) -> Result<Packet> {
     }
 }
 
-fn string(out: &mut Vec<u8>, text: &str) -> Result<()> {
-    bytes(out, text.as_bytes())
+/// MQTT's own fields, read off codec's cursor: binary data and the UTF-8
+/// string, each behind a two-byte big-endian length.
+pub trait Mqtt<'a> {
+    /// The next binary data.
+    ///
+    /// # Errors
+    /// The length or the data runs past the packet.
+    fn binary(&mut self) -> Result<&'a [u8]>;
+
+    /// The next UTF-8 string.
+    ///
+    /// # Errors
+    /// The string runs past the packet, or is not UTF-8.
+    fn string(&mut self) -> Result<String>;
 }
 
-fn bytes(out: &mut Vec<u8>, data: &[u8]) -> Result<()> {
-    let length =
-        u16::try_from(data.len()).map_err(|_| protocol_error("a string over 65535 bytes"))?;
-    out.extend_from_slice(&length.to_be_bytes());
-    out.extend_from_slice(data);
-    Ok(())
+impl<'a> Mqtt<'a> for Cursor<'a> {
+    fn binary(&mut self) -> Result<&'a [u8]> {
+        let length = usize::from(self.u16_be()?);
+        Ok(self.take(length)?)
+    }
+
+    fn string(&mut self) -> Result<String> {
+        String::from_utf8(self.binary()?.to_vec())
+            .map_err(|_| protocol_error("a string that is not UTF-8"))
+    }
 }
 
-fn take_u8(body: &[u8], at: &mut usize) -> Result<u8> {
-    let byte = *body
-        .get(*at)
-        .ok_or_else(|| protocol_error("a packet shorter than its header"))?;
-    *at += 1;
-    Ok(byte)
+/// MQTT's own fields, written beside codec's writer.
+pub trait MqttWrite {
+    /// `data` behind its two-byte length.
+    ///
+    /// # Errors
+    /// Data over 65535 bytes.
+    fn binary(&mut self, data: &[u8]) -> Result<&mut Self>;
+
+    /// `text` as a UTF-8 string behind its two-byte length.
+    ///
+    /// # Errors
+    /// A string over 65535 bytes.
+    fn string(&mut self, text: &str) -> Result<&mut Self>;
 }
 
-fn take_u16(body: &[u8], at: &mut usize) -> Result<u16> {
-    let high = take_u8(body, at)?;
-    let low = take_u8(body, at)?;
-    Ok(u16::from_be_bytes([high, low]))
-}
+impl MqttWrite for Vec<u8> {
+    fn binary(&mut self, data: &[u8]) -> Result<&mut Self> {
+        let length =
+            u16::try_from(data.len()).map_err(|_| protocol_error("a string over 65535 bytes"))?;
+        Ok(self.u16_be(length).bytes(data))
+    }
 
-fn take_bytes(body: &[u8], at: &mut usize) -> Result<Vec<u8>> {
-    let length = usize::from(take_u16(body, at)?);
-    let end = *at + length;
-    let data = body
-        .get(*at..end)
-        .ok_or_else(|| protocol_error("a length that runs past the packet"))?;
-    *at = end;
-    Ok(data.to_vec())
-}
-
-fn take_string(body: &[u8], at: &mut usize) -> Result<String> {
-    String::from_utf8(take_bytes(body, at)?)
-        .map_err(|_| protocol_error("a string that is not UTF-8"))
+    fn string(&mut self, text: &str) -> Result<&mut Self> {
+        self.binary(text.as_bytes())
+    }
 }
 
 #[cfg(test)]
@@ -374,7 +377,9 @@ mod tests {
             "five length bytes"
         );
         assert!(read(&mut &[0x50, 0x00][..]).is_err(), "PUBREC");
-        assert!(read(&mut &[0x30, 0x02, 0x00, 0x05][..]).is_err(), "past");
+        let error = read(&mut &[0x30, 0x02, 0x00, 0x05][..]).expect_err("past");
+        assert!(error.message.contains("runs past"), "{}", error.message);
+        assert!(!error.retryable);
         assert!(
             read(&mut &[0x10, 0x08, 0x00, 0x04, b'M', b'Q', b'T', b'T', 3, 0][..]).is_err(),
             "3.1"

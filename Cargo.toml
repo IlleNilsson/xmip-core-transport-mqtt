@@ -15,9 +15,11 @@ path = "src/lib.rs"
 
 [dependencies]
 # A Technology depends on its parent Capability, never the reverse
-# (repository-model.md). Standard library otherwise: MQTT is a fixed header
-# and a length.
+# (repository-model.md). MQTT is a fixed header and a length.
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
+# The estate's encoding primitives: the byte cursor and writer a control
+# packet is read and written over, and the varint its remaining length is.
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 
 [dev-dependencies]
 # The loopback payloads the tests drive, from the capability's test

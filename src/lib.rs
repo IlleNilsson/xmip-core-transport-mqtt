@@ -162,7 +162,7 @@ impl MqttTransport {
 }
 
 impl Accepting for MqttTransport {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
         session
             .next_publish()?
@@ -172,8 +172,7 @@ impl Accepting for MqttTransport {
 
 impl Loopback for MqttTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening::new(self.clone(), listener, address)))
+        Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
     /// A fresh client to `address`, publishing at this transport's `QoS` on

@@ -4,21 +4,24 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::time::Duration;
 
-use transport::Arrived;
 use transport::error::{Result, classify, protocol_error};
-use transport::socket;
+use transport::pool::{Pooled, alive};
+use transport::{Arrived, Login, socket};
 
 use crate::packet::{Packet, Publish, encode, read};
 
-/// What a Location presents when it connects.
+/// What a Location presents when it connects: its client identifier, and
+/// the login where the broker asks for one. An empty password is sent as
+/// none, which MQTT 3.1.1 allows beside a user name.
 #[derive(Clone, Debug, Default)]
 pub struct Credentials {
     pub client_id: String,
-    pub username: Option<String>,
-    pub password: Option<Vec<u8>>,
+    pub login: Option<Login>,
 }
 
 /// One connected client: publishes, subscribes, takes what the broker sends.
+/// Kept between publishes while the broker keeps it open: CONNECT says no
+/// keep-alive, so an idle client is never timed out.
 pub struct Client {
     stream: TcpStream,
     broker: String,
@@ -41,10 +44,13 @@ impl Client {
             broker: broker.to_string(),
             next_id: 0,
         };
+        let login = credentials.login.as_ref();
         client.write(&Packet::Connect {
             client_id: credentials.client_id.clone(),
-            username: credentials.username.clone(),
-            password: credentials.password.clone(),
+            username: login.map(|login| login.user.clone()),
+            password: login
+                .filter(|login| !login.password.is_empty())
+                .map(|login| login.password.as_bytes().to_vec()),
             keep_alive: 0,
         })?;
         match read(&mut client.stream)? {
@@ -154,5 +160,12 @@ impl Client {
         self.stream
             .flush()
             .map_err(|e| classify("flushing a packet", &e))
+    }
+}
+
+impl Pooled for Client {
+    /// While the broker has not closed the connection.
+    fn usable(&mut self) -> bool {
+        alive(&self.stream)
     }
 }

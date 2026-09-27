@@ -33,7 +33,7 @@ use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Directions, Login, Pool, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 #[derive(Clone)]
@@ -43,6 +43,8 @@ pub struct MqttTransport {
     qos: u8,
     credentials: Credentials,
     timeout: Option<Duration>,
+    /// The clients a send publishes on, connected once per broker and kept.
+    clients: Pool<Client>,
 }
 
 impl MqttTransport {
@@ -55,10 +57,10 @@ impl MqttTransport {
             qos: 1,
             credentials: Credentials {
                 client_id: "xmip".to_string(),
-                username: None,
-                password: None,
+                login: None,
             },
             timeout: None,
+            clients: Pool::new(),
         }
     }
 
@@ -177,7 +179,9 @@ impl Configured for MqttTransport {
         if let Some(client_id) = settings.optional_text("client_id") {
             credentials.client_id = client_id.to_string();
         }
-        credentials.username = settings.optional_text("username").map(str::to_string);
+        credentials.login = settings
+            .optional_text("username")
+            .map(|user| Login::new(user, ""));
         transport = transport.presenting(credentials);
         Ok(match settings.optional_duration("timeout") {
             Some(timeout) => transport.timing_out_after(timeout),
@@ -212,12 +216,15 @@ impl Transport for MqttTransport {
         Ok(arrived)
     }
 
+    /// Publish on the client kept for the broker, connected on the first
+    /// send to it.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let (broker, topic) = self.resolve(target);
-        let mut client = Client::connect(broker, &self.credentials, self.timeout)?;
-        client.publish(topic, bytes, self.qos)?;
-        client.disconnect();
-        Ok(())
+        self.clients.exchange(
+            broker,
+            || Client::connect(broker, &self.credentials, self.timeout),
+            |client| client.publish(topic, bytes, self.qos),
+        )
     }
 }
 
@@ -299,12 +306,42 @@ mod tests {
         let first = session.next_publish().expect("first").expect("one");
         assert_eq!(first.bytes, b"21.5");
         assert!(first.origin_uri.ends_with("/sensor/1?qos=1"));
-        assert!(session.next_publish().expect("closed").is_none());
-        let mut session = far_end.accept_one(&listener).expect("second");
+        // The same broker, so the same client: connected once.
         let second = session.next_publish().expect("second").expect("one");
         assert!(second.origin_uri.ends_with("/sensor/2?qos=1"));
         assert!(second.bytes.is_empty());
         sender.join().expect("thread").expect("sending");
+    }
+
+    #[test]
+    fn a_thousand_publishes_connect_once_and_a_client_the_broker_closed_is_replaced() {
+        const SENDS: usize = 1000;
+        let far_end = MqttTransport::new("127.0.0.1:0", "probe").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = MqttTransport::new(address, "probe").timing_out_after(secs(5));
+        let sending = near.clone();
+        let sender = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            for n in 0..SENDS {
+                sending.send("sensor/1", n.to_string().as_bytes())?;
+            }
+            let took = began.elapsed();
+            // Generous for a debug build under load: a millisecond a publish.
+            assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
+            sending.send("sensor/1", b"after the close")
+        });
+        // One CONNECT for every publish: one session accepted.
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        for n in 0..SENDS {
+            let arrived = session.next_publish().expect("publish").expect("one");
+            assert_eq!(arrived.bytes, n.to_string().as_bytes());
+        }
+        drop(session);
+        let mut again = far_end.accept_one(&listener).expect("a new client");
+        let last = again.next_publish().expect("publish").expect("one");
+        assert_eq!(last.bytes, b"after the close");
+        sender.join().expect("thread").expect("sending");
+        assert_eq!(near.clients.opened(), 2);
     }
 
     #[test]

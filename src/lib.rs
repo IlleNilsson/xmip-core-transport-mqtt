@@ -28,11 +28,13 @@ use std::time::Duration;
 pub use client::{Client, Credentials};
 pub use packet::{Packet, Publish};
 pub use session::{Event, Session};
+use transport::Configured;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 #[derive(Clone)]
 pub struct MqttTransport {
@@ -117,6 +119,73 @@ impl MqttTransport {
     }
 }
 
+impl Configured for MqttTransport {
+    /// The address is the broker, `host:1883`, both sides connect to.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "topic",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "What a Receive Location subscribes to, or a Send Location publishes to.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "qos",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 1,
+                },
+                presence: Presence::Optional,
+                meaning: "The quality of service published and subscribed at; 1 when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "client_id",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The client identifier presented when connecting.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "username",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The user name presented when connecting, its password the credentials'.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a peer that stops mid-packet is waited on, and a quiet broker.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    /// The password is not a setting: it comes through the Location's
+    /// `credentials`, never its table.
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let mut transport = Self::new(address, settings.text("topic"));
+        if let Some(qos) = settings.optional_integer("qos") {
+            // The declaration holds it at 0 or 1.
+            transport = transport.at_qos(u8::try_from(qos).unwrap_or(1));
+        }
+        let mut credentials = transport.credentials.clone();
+        if let Some(client_id) = settings.optional_text("client_id") {
+            credentials.client_id = client_id.to_string();
+        }
+        credentials.username = settings.optional_text("username").map(str::to_string);
+        transport = transport.presenting(credentials);
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 impl Transport for MqttTransport {
     fn name(&self) -> &'static str {
         "mqtt"
@@ -190,6 +259,31 @@ impl Loopback for MqttTransport {
 mod tests {
     use super::*;
     use transport::payload::{edge_payloads, sized_payloads};
+
+    #[test]
+    fn mqtt_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert!(MqttTransport::SETTINGS.problems().is_empty());
+        let given = [
+            (
+                "topic".to_string(),
+                Given::Text("plant/+/temperature".to_string()),
+            ),
+            ("qos".to_string(), Given::Integer(0)),
+            ("client_id".to_string(), Given::Text("line-4".to_string())),
+            ("timeout".to_string(), Given::Text("5s".to_string())),
+        ];
+        let built = MqttTransport::open("broker:1883", Applies::Receive, &given).expect("built");
+        assert_eq!(built.broker, "broker:1883");
+        assert_eq!(built.topic, "plant/+/temperature");
+        assert_eq!(built.qos, 0);
+        assert_eq!(built.credentials.client_id, "line-4");
+        assert_eq!(built.timeout, Some(secs(5)));
+        let Err(refused) = MqttTransport::open("broker:1883", Applies::Send, &given[1..]) else {
+            panic!("topic is required");
+        };
+        assert!(refused.message.contains("\"topic\""), "{refused}");
+    }
 
     #[test]
     fn a_client_publishes_to_a_session_and_is_acknowledged() {

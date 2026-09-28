@@ -26,12 +26,14 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 pub use client::{Client, Credentials};
+use net::Target;
 pub use packet::{Packet, Publish};
 pub use session::{Event, Session};
 use transport::Configured;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::pool::delivered;
 use transport::socket;
 use transport::{Arrived, Directions, Login, Pool, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
@@ -45,6 +47,9 @@ pub struct MqttTransport {
     timeout: Option<Duration>,
     /// The clients a send publishes on, connected once per broker and kept.
     clients: Pool<Client>,
+    /// The client a receive takes from, connected and subscribed on the
+    /// first receive and kept subscribed.
+    subscriptions: Pool<Client>,
 }
 
 impl MqttTransport {
@@ -61,12 +66,13 @@ impl MqttTransport {
             },
             timeout: None,
             clients: Pool::new(),
+            subscriptions: Pool::new(),
         }
     }
 
     /// Publish and subscribe at `qos`, 0 or 1.
     #[must_use]
-    pub const fn at_qos(mut self, qos: u8) -> Self {
+    const fn at_qos(mut self, qos: u8) -> Self {
         self.qos = if qos > 1 { 1 } else { qos };
         self
     }
@@ -113,7 +119,7 @@ impl MqttTransport {
     /// Where a target names the broker and topic itself —
     /// `mqtt://host:1883/a/b` — or is a topic alone on this transport's broker.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match socket::target("mqtt", target) {
+        match Target::under(&["mqtt"], target).map(|named| (named.authority(), named.path())) {
             Some((peer, "")) => (peer, &self.topic),
             Some(pair) => pair,
             None => (&self.broker, target),
@@ -199,21 +205,19 @@ impl Transport for MqttTransport {
         Directions::BOTH
     }
 
-    /// Subscribe and take what the broker delivers until it is quiet for the
-    /// timeout, or disconnects.
+    /// Take what the broker delivers until it is quiet for the timeout, or
+    /// disconnects, on the subscription the first receive made and kept:
+    /// what the broker delivered between two receives waits in the socket.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let mut client = self.connect()?;
-        client.subscribe(&self.topic, self.qos)?;
-        let mut arrived = Vec::new();
-        loop {
-            match client.next_publish() {
-                Ok(Some(message)) => arrived.push(message),
-                Ok(None) => break,
-                Err(error) if error.retryable && !arrived.is_empty() => break,
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(arrived)
+        self.subscriptions.exchange(
+            self.broker.as_str(),
+            || {
+                let mut client = self.connect()?;
+                client.subscribe(&self.topic, self.qos)?;
+                Ok(client)
+            },
+            |client| delivered(client, Client::next_publish),
+        )
     }
 
     /// Publish on the client kept for the broker, connected on the first
@@ -367,6 +371,46 @@ mod tests {
         assert_eq!(arrived.len(), 2);
         assert_eq!(arrived[0].bytes, b"first");
         assert!(arrived[1].origin_uri.ends_with("/sensor/2?qos=0"));
+    }
+
+    #[test]
+    fn five_receives_subscribe_once_and_a_subscription_the_broker_closed_is_replaced() {
+        let far_end = MqttTransport::new("127.0.0.1:0", "probe").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = MqttTransport::new(address, "sensor/#")
+            .at_qos(0)
+            .timing_out_after(Duration::from_millis(100));
+        let receiving = near.clone();
+        let (taken, told) = std::sync::mpsc::channel();
+        let receiver = std::thread::spawn(move || {
+            let mut arrived = Vec::new();
+            while arrived.len() < 6 {
+                let now = receiving.receive()?;
+                if !now.is_empty() {
+                    taken.send(()).expect("told");
+                }
+                arrived.extend(now.into_iter().map(|one| one.bytes));
+            }
+            Ok::<_, transport::TransportError>(arrived)
+        });
+        let subscribed = |session: &mut Session| {
+            let event = session.next_event().expect("subscribed");
+            assert!(matches!(event, Some(Event::Subscribed(_))), "{event:?}");
+        };
+        // One SUBSCRIBE for every receive: one session accepted.
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        subscribed(&mut session);
+        for round in 0..5u8 {
+            session.deliver("sensor/1", &[round]).expect("delivered");
+            told.recv().expect("taken");
+        }
+        drop(session);
+        let mut again = far_end.accept_one(&listener).expect("a new client");
+        subscribed(&mut again);
+        again.deliver("sensor/1", &[5]).expect("delivered");
+        let arrived = receiver.join().expect("thread").expect("receiving");
+        assert_eq!(arrived, (0..6u8).map(|n| vec![n]).collect::<Vec<_>>());
+        assert_eq!(near.subscriptions.opened(), 2);
     }
 
     #[test]

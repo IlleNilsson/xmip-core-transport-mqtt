@@ -15,7 +15,7 @@ use codec::writer::ByteWriter;
 use transport::error::{Result, classify, protocol_error};
 
 /// The most a remaining length may say: four bytes of seven bits.
-pub const MAX_REMAINING: usize = 268_435_455;
+const MAX_REMAINING: usize = 268_435_455;
 
 /// One application message, as PUBLISH carries it.
 #[derive(Clone, Debug, PartialEq, Eq)]

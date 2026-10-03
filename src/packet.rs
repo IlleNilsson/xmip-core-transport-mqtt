@@ -33,6 +33,10 @@ pub struct Publish {
 pub enum Packet {
     Connect {
         client_id: String,
+        /// Whether the broker discards the session when the connection
+        /// ends; a kept session is what unacknowledged `QoS` 1 deliveries
+        /// are sent again from when the client reconnects.
+        clean_session: bool,
         username: Option<String>,
         password: Option<Vec<u8>>,
         keep_alive: u16,
@@ -65,12 +69,13 @@ pub fn encode(packet: &Packet) -> Result<Vec<u8>> {
     let head = match packet {
         Packet::Connect {
             client_id,
+            clean_session,
             username,
             password,
             keep_alive,
         } => {
             body.string("MQTT")?.byte(4);
-            let mut flags = 0x02;
+            let mut flags = if *clean_session { 0x02 } else { 0 };
             if username.is_some() {
                 flags |= 0x80;
             }
@@ -194,6 +199,7 @@ fn decode(head: u8, body: &[u8]) -> Result<Packet> {
             };
             Ok(Packet::Connect {
                 client_id,
+                clean_session: flags & 0x02 != 0,
                 username,
                 password,
                 keep_alive,
@@ -311,12 +317,14 @@ mod tests {
     fn every_packet_round_trips() {
         round_trip(&Packet::Connect {
             client_id: "xmip".into(),
+            clean_session: false,
             username: Some("u".into()),
             password: Some(b"p".to_vec()),
             keep_alive: 30,
         });
         round_trip(&Packet::Connect {
             client_id: String::new(),
+            clean_session: true,
             username: None,
             password: None,
             keep_alive: 0,

@@ -10,7 +10,7 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-use transport::Arrived;
+use transport::Taken;
 use transport::error::{Result, classify, protocol_error};
 use transport::socket;
 
@@ -19,10 +19,13 @@ use crate::packet::{Packet, Publish, encode, read};
 /// What a client did, as [`Session::next_event`] reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// The client published; here is the Stream.
-    Published(Arrived),
+    /// The client published; here is what it published.
+    Published(Taken),
     /// The client subscribed to these filters, and was granted them.
     Subscribed(Vec<String>),
+    /// The client acknowledged the `QoS` 1 delivery under this packet
+    /// identifier.
+    PubAcked(u16),
 }
 
 pub struct Session {
@@ -74,18 +77,18 @@ impl Session {
     ///
     /// # Errors
     /// Where the connection broke, or nothing arrived before the timeout.
-    pub fn next_publish(&mut self) -> Result<Option<Arrived>> {
+    pub fn next_publish(&mut self) -> Result<Option<Taken>> {
         loop {
             match self.next_event()? {
-                Some(Event::Published(arrived)) => return Ok(Some(arrived)),
-                Some(Event::Subscribed(_)) => {}
+                Some(Event::Published(taken)) => return Ok(Some(taken)),
+                Some(Event::Subscribed(_) | Event::PubAcked(_)) => {}
                 None => return Ok(None),
             }
         }
     }
 
     /// The next thing the client did, or `None` when it disconnected. Pings
-    /// are answered on the way and acknowledgements absorbed.
+    /// are answered on the way.
     ///
     /// # Errors
     /// Where the connection broke, nothing arrived before the timeout, or the
@@ -99,10 +102,7 @@ impl Session {
                     }
                     let origin =
                         format!("mqtt://{}/{}?qos={}", self.peer, publish.topic, publish.qos);
-                    return Ok(Some(Event::Published(Arrived::new(
-                        origin,
-                        publish.payload,
-                    ))));
+                    return Ok(Some(Event::Published(Taken::new(origin, publish.payload))));
                 }
                 Some(Packet::Subscribe { id, filters }) => {
                     let codes = filters.iter().map(|(_, qos)| (*qos).min(1)).collect();
@@ -113,7 +113,7 @@ impl Session {
                 }
                 Some(Packet::PingReq) => self.write(&Packet::PingResp)?,
                 Some(Packet::Disconnect) | None => return Ok(None),
-                Some(Packet::PubAck(_)) => {}
+                Some(Packet::PubAck(id)) => return Ok(Some(Event::PubAcked(id))),
                 Some(other) => {
                     return Err(protocol_error(format!("{other:?} from a client")));
                 }
@@ -126,11 +126,24 @@ impl Session {
     /// # Errors
     /// Where the client went away.
     pub fn deliver(&mut self, topic: &str, payload: &[u8]) -> Result<()> {
+        self.deliver_at(topic, payload, None)
+    }
+
+    /// Deliver `payload` on `topic` to the client at `QoS` 1 under packet
+    /// identifier `id`, for the client to PUBACK ([`Event::PubAcked`]).
+    ///
+    /// # Errors
+    /// Where the client went away.
+    pub fn deliver_at_least_once(&mut self, topic: &str, payload: &[u8], id: u16) -> Result<()> {
+        self.deliver_at(topic, payload, Some(id))
+    }
+
+    fn deliver_at(&mut self, topic: &str, payload: &[u8], id: Option<u16>) -> Result<()> {
         self.write(&Packet::Publish(Publish {
             topic: topic.to_string(),
-            qos: 0,
+            qos: u8::from(id.is_some()),
             retain: false,
-            id: None,
+            id,
             payload: payload.to_vec(),
         }))
     }

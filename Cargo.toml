@@ -25,6 +25,10 @@ xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core
 # The estate's encoding primitives: the byte cursor and writer a control
 # packet is read and written over, and the varint its remaining length is.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
+# A Location's client identifier, where its configuration names none, is
+# the SHA-256 of what it is configured with (`client_id::derived`): the
+# same configuration, the same identifier, across restarts.
+sha2 = "0.11"
 
 [dev-dependencies]
 # The loopback payloads the tests drive, from the capability's test

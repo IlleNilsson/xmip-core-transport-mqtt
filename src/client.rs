@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use transport::error::{Result, classify, protocol_error};
 use transport::pool::{Pooled, alive};
-use transport::{Arrived, Login, socket};
+use transport::{Login, socket};
 
 use crate::packet::{Packet, Publish, encode, read};
 
@@ -24,12 +24,12 @@ pub struct Credentials {
 /// keep-alive, so an idle client is never timed out.
 pub struct Client {
     stream: TcpStream,
-    broker: String,
     next_id: u16,
 }
 
 impl Client {
-    /// Connect to `broker` and complete the CONNECT handshake.
+    /// Connect to `broker` on a clean session and complete the CONNECT
+    /// handshake.
     ///
     /// # Errors
     /// Where the broker refused the connection or could not be reached.
@@ -38,15 +38,41 @@ impl Client {
         credentials: &Credentials,
         timeout: Option<Duration>,
     ) -> Result<Self> {
+        Self::open(broker, credentials, timeout, true)
+    }
+
+    /// Connect to `broker` keeping the session the client id names, where
+    /// it names one: the broker sends again, with DUP, every `QoS` 1
+    /// delivery this client had not acknowledged when it reconnects. An
+    /// empty client id can only have a clean session (MQTT 3.1.1, 3.1.3.1).
+    ///
+    /// # Errors
+    /// Where the broker refused the connection or could not be reached.
+    pub fn connect_keeping_session(
+        broker: &str,
+        credentials: &Credentials,
+        timeout: Option<Duration>,
+    ) -> Result<Self> {
+        Self::open(
+            broker,
+            credentials,
+            timeout,
+            credentials.client_id.is_empty(),
+        )
+    }
+
+    fn open(
+        broker: &str,
+        credentials: &Credentials,
+        timeout: Option<Duration>,
+        clean_session: bool,
+    ) -> Result<Self> {
         let stream = socket::connect_tcp(broker, timeout)?;
-        let mut client = Self {
-            stream,
-            broker: broker.to_string(),
-            next_id: 0,
-        };
+        let mut client = Self { stream, next_id: 0 };
         let login = credentials.login.as_ref();
         client.write(&Packet::Connect {
             client_id: credentials.client_id.clone(),
+            clean_session,
             username: login.map(|login| login.user.clone()),
             password: login
                 .filter(|login| !login.password.is_empty())
@@ -108,26 +134,33 @@ impl Client {
         }
     }
 
-    /// The next message the broker delivers, or `None` when it disconnected.
+    /// The next message the broker delivers, or `None` when it
+    /// disconnected. Not acknowledged: a `QoS` 1 delivery waits for
+    /// [`Client::puback`].
     ///
     /// # Errors
     /// Where the connection broke, or nothing arrived before the timeout.
-    pub fn next_publish(&mut self) -> Result<Option<Arrived>> {
+    pub fn next_publish(&mut self) -> Result<Option<Publish>> {
         match self.read_while_serving()? {
-            Some(Packet::Publish(publish)) => {
-                if let Some(id) = publish.id {
-                    self.write(&Packet::PubAck(id))?;
-                }
-                Ok(Some(Arrived::new(
-                    format!(
-                        "mqtt://{}/{}?qos={}",
-                        self.broker, publish.topic, publish.qos
-                    ),
-                    publish.payload,
-                )))
-            }
+            Some(Packet::Publish(publish)) => Ok(Some(publish)),
             _ => Ok(None),
         }
+    }
+
+    /// PUBACK the `QoS` 1 delivery under packet identifier `id`: the broker
+    /// is done with it.
+    ///
+    /// # Errors
+    /// Where the broker went away.
+    pub fn puback(&mut self, id: u16) -> Result<()> {
+        self.write(&Packet::PubAck(id))
+    }
+
+    /// Close the connection without DISCONNECT, so the broker keeps what
+    /// this client had not acknowledged for when it reconnects; the client
+    /// is no longer [`Pooled::usable`].
+    pub fn let_go(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 
     /// Say goodbye and close. A broker that already closed — after the last

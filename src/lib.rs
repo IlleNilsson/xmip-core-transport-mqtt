@@ -44,6 +44,7 @@ use client_id::Side;
 use net::Target;
 pub use packet::{Packet, Publish};
 pub use session::{Event, Session};
+use transport::ArrivalIdentity;
 use transport::Configured;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
@@ -266,7 +267,7 @@ impl Transport for MqttTransport {
                          keeps nothing to send again",
                     ),
                 };
-                Arrived::whole(origin, publish.payload, acknowledgement)
+                Arrived::whole(origin, publish.payload, acknowledgement).detected()
             })
             .collect())
     }
@@ -332,6 +333,12 @@ impl Accepting for MqttTransport {
 }
 
 impl Loopback for MqttTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Unnamed(
+            "the broker delivers it and names no sender; the peer is the broker",
+        )
+    }
+
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }

@@ -231,6 +231,10 @@ impl Transport for MqttTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the broker is drained until quiet for the timeout")
+    }
+
     /// Take what the broker delivers until it is quiet for the timeout, or
     /// disconnects, on the subscription the first receive made, on the
     /// session its client id keeps, and kept: what the broker delivered

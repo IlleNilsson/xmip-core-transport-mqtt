@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn mqtt_declares_its_settings_and_reads_through_them() {
         use xcore::settings::Given;
-        assert!(MqttTransport::SETTINGS.problems().is_empty());
+        assert_eq!(MqttTransport::SETTINGS.problems(), [] as [String; 0]);
         let given = [
             (
                 "topic".to_string(),
@@ -412,7 +412,7 @@ mod tests {
         // The same broker, so the same client: connected once.
         let second = session.next_publish().expect("second").expect("one");
         assert!(second.origin_uri.ends_with("/sensor/2?qos=1"));
-        assert!(second.bytes.is_empty());
+        assert_eq!(second.bytes, [] as [u8; 0]);
         sender.join().expect("thread").expect("sending");
     }
 

@@ -243,7 +243,7 @@ impl Transport for MqttTransport {
     /// accepted or refused it, and lets the subscription go when the cycle
     /// failed, for the broker to send it again on the next connection. **A `QoS` 0
     /// delivery is at-most-once**: the protocol does not acknowledge it.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         let publishes = self.subscriptions.exchange(
             self.broker.as_str(),
             || {
@@ -255,7 +255,7 @@ impl Transport for MqttTransport {
                 client.subscribe(&self.topic, self.qos)?;
                 Ok(client)
             },
-            |client| delivered(client, Client::next_publish),
+            |client| delivered(client, most, Client::next_publish),
         )?;
         Ok(publishes
             .into_iter()
@@ -276,9 +276,16 @@ impl Transport for MqttTransport {
             .collect())
     }
 
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered(
+            "one PUBLISH packet carries the whole body, its remaining length counted first",
+        )
+    }
+
     /// Publish on the client kept for the broker, connected on the first
     /// send to it.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         let (broker, topic) = self.resolve(target);
         self.clients.exchange(
             broker,

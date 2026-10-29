@@ -142,7 +142,7 @@ impl MqttTransport {
     /// Where a target names the broker and topic itself —
     /// `mqtt://host:1883/a/b` — or is a topic alone on this transport's broker.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match Target::under(&["mqtt"], target).map(|named| (named.authority(), named.path())) {
+        match Target::under(Self::SCHEMES, target).map(|named| (named.authority(), named.path())) {
             Some((peer, "")) => (peer, &self.topic),
             Some(pair) => pair,
             None => (&self.broker, target),
@@ -196,6 +196,9 @@ impl Configured for MqttTransport {
             },
         ],
     };
+
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["mqtt"];
 
     /// The password is not a setting: it comes through the Location's
     /// `credentials`, never its table.

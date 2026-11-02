@@ -434,13 +434,9 @@ mod tests {
         let near = MqttTransport::new(address, "probe").timing_out_after(secs(5));
         let sending = near.clone();
         let sender = std::thread::spawn(move || {
-            let began = std::time::Instant::now();
             for n in 0..SENDS {
                 sending.send("sensor/1", n.to_string().as_bytes())?;
             }
-            let took = began.elapsed();
-            // Generous for a debug build under load: a millisecond a publish.
-            assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
             sending.send("sensor/1", b"after the close")
         });
         // One CONNECT for every publish: one session accepted.

@@ -371,6 +371,7 @@ impl Loopback for MqttTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use transport::payload::{edge_payloads, sized_payloads};
 
     #[test]
@@ -504,7 +505,7 @@ mod tests {
         });
         let subscribed = |session: &mut Session| {
             let event = session.next_event().expect("subscribed");
-            assert!(matches!(event, Some(Event::Subscribed(_))), "{event:?}");
+            assert_matches!(event, Some(Event::Subscribed(_)), "{event:?}");
         };
         // One SUBSCRIBE for every receive: one session accepted.
         let mut session = far_end.accept_one(&listener).expect("accepting");
@@ -546,10 +547,10 @@ mod tests {
         });
         let mut session = far_end.accept_one(&listener).expect("accepting");
         assert_eq!(session.client_id(), subscriber, "the receive side's own");
-        assert!(matches!(
+        assert_matches!(
             session.next_event().expect("subscribed"),
             Some(Event::Subscribed(_))
-        ));
+        );
         for (topic, body, id) in [
             ("sensor/1", &b"one"[..], 1),
             ("sensor/2", b"two", 2),
@@ -570,10 +571,10 @@ mod tests {
         assert_eq!(session.next_event().expect("let go"), None);
         let mut again = far_end.accept_one(&listener).expect("reconnected");
         assert_eq!(again.client_id(), subscriber, "the same session again");
-        assert!(matches!(
+        assert_matches!(
             again.next_event().expect("subscribed"),
             Some(Event::Subscribed(_))
-        ));
+        );
         again
             .deliver_at_least_once("sensor/3", b"three", 3)
             .expect("again");

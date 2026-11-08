@@ -12,6 +12,7 @@ use std::io::Read;
 
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
+use net::{MAX_BODY, ceiling};
 use transport::error::{Result, classify, protocol_error};
 
 /// The most a remaining length may say: four bytes of seven bits.
@@ -164,6 +165,9 @@ pub fn read(reader: &mut impl Read) -> Result<Option<Packet>> {
             return Err(protocol_error("a remaining length over four bytes"));
         }
     }
+    // The protocol allows 256 MiB; what the peer says is held to what Xmip
+    // reads in one body before a byte of it is allocated.
+    ceiling::within(remaining, MAX_BODY, "Xmip reads in one body")?;
     let mut body = vec![0u8; remaining];
     reader
         .read_exact(&mut body)
@@ -392,5 +396,18 @@ mod tests {
             read(&mut &[0x10, 0x08, 0x00, 0x04, b'M', b'Q', b'T', b'T', 3, 0][..]).is_err(),
             "3.1"
         );
+    }
+
+    #[test]
+    fn a_remaining_length_over_the_body_ceiling_is_refused_before_allocating() {
+        // Five bytes said 268 435 455 and were answered with a vector that
+        // size before the read found nothing behind them.
+        let hostile = [0x30, 0xff, 0xff, 0xff, 0x7f];
+        let error = read(&mut &hostile[..]).expect_err("over");
+        assert_eq!(
+            error.message,
+            format!("268435455 bytes is over the {MAX_BODY} Xmip reads in one body")
+        );
+        assert!(!error.retryable);
     }
 }

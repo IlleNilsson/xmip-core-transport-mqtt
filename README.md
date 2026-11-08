@@ -2,6 +2,8 @@
 
 MQTT transport: one PUBLISH is one Stream, the topic beside it; a Location subscribes or publishes through a broker, or accepts clients directly. MQTT 3.1.1 at QoS 0 and 1. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
+A packet's remaining length may say up to 256 MiB; what a peer says is held to the 64 MiB Xmip reads in one body (`net::MAX_BODY`, through `net::ceiling::within`) before any of it is allocated.
+
 A Send Location publishes on a client connected once per broker and kept (`transport::Pool`), CONNECT asking for no keep-alive; a client the broker closed is replaced and the publish goes again. The login is the transport capability's `Login`, beside the client identifier in `Credentials`. Until 2026-09-27 every publish connected and disconnected.
 
 A Receive Location subscribes once: its first receive connects and subscribes, and the subscription stays attached between receives, so what the broker delivers meanwhile waits in the socket for the next; each receive takes what came until the broker is quiet for the timeout (`transport::pool::delivered`). A subscription the broker closed is replaced. Until 2026-09-28 every receive connected and subscribed anew.

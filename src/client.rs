@@ -11,10 +11,11 @@ use transport::{Login, socket};
 use crate::packet::{Packet, Publish, encode, read};
 
 /// What a Location presents when it connects: its client identifier, and
-/// the login where the broker asks for one. An empty password is sent as
-/// none, which MQTT 3.1.1 allows beside a user name.
+/// the login where the broker asks for one, its password the Location's
+/// secret. An empty password is sent as none, which MQTT 3.1.1 allows
+/// beside a user name.
 #[derive(Clone, Debug, Default)]
-pub struct Credentials {
+pub struct Presented {
     pub client_id: String,
     pub login: Option<Login>,
 }
@@ -33,12 +34,8 @@ impl Client {
     ///
     /// # Errors
     /// Where the broker refused the connection or could not be reached.
-    pub fn connect(
-        broker: &str,
-        credentials: &Credentials,
-        timeout: Option<Duration>,
-    ) -> Result<Self> {
-        Self::open(broker, credentials, timeout, true)
+    pub fn connect(broker: &str, presented: &Presented, timeout: Option<Duration>) -> Result<Self> {
+        Self::open(broker, presented, timeout, true)
     }
 
     /// Connect to `broker` keeping the session the client id names, where
@@ -50,28 +47,23 @@ impl Client {
     /// Where the broker refused the connection or could not be reached.
     pub fn connect_keeping_session(
         broker: &str,
-        credentials: &Credentials,
+        presented: &Presented,
         timeout: Option<Duration>,
     ) -> Result<Self> {
-        Self::open(
-            broker,
-            credentials,
-            timeout,
-            credentials.client_id.is_empty(),
-        )
+        Self::open(broker, presented, timeout, presented.client_id.is_empty())
     }
 
     fn open(
         broker: &str,
-        credentials: &Credentials,
+        presented: &Presented,
         timeout: Option<Duration>,
         clean_session: bool,
     ) -> Result<Self> {
         let stream = socket::connect_tcp(broker, timeout)?;
         let mut client = Self { stream, next_id: 0 };
-        let login = credentials.login.as_ref();
+        let login = presented.login.as_ref();
         client.write(&Packet::Connect {
-            client_id: credentials.client_id.clone(),
+            client_id: presented.client_id.clone(),
             clean_session,
             username: login.map(|login| login.user.clone()),
             password: login

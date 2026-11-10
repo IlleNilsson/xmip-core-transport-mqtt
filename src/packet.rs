@@ -185,6 +185,11 @@ fn decode(head: u8, body: &[u8]) -> Result<Packet> {
                 return Err(protocol_error("a CONNECT that is not MQTT 3.1.1"));
             }
             let flags = cursor.byte()?;
+            if flags & 0xc0 == 0x40 {
+                return Err(protocol_error(
+                    "a CONNECT with a password and no user name (MQTT 3.1.1 section 3.1.2.9)",
+                ));
+            }
             let keep_alive = cursor.u16_be()?;
             let client_id = cursor.string()?;
             if flags & 0x04 != 0 {

@@ -39,7 +39,7 @@ pub mod session;
 use std::net::TcpListener;
 use std::time::Duration;
 
-pub use client::{Client, Credentials};
+pub use client::{Client, Presented};
 use client_id::Side;
 use net::Target;
 pub use packet::{Packet, Publish};
@@ -63,6 +63,9 @@ pub struct MqttTransport {
     /// else each side's is derived ([`client_id::derived`]).
     client_id: Option<String>,
     login: Option<Login>,
+    /// The secret its Location names, whose password the login presents,
+    /// read at each connection (ADR-0019, amendment 2026-10-29).
+    secret: Option<transport::Secured>,
     timeout: Option<Duration>,
     /// The clients a send publishes on, connected once per broker and kept.
     clients: Pool<Client>,
@@ -81,6 +84,7 @@ impl MqttTransport {
             qos: 1,
             client_id: None,
             login: None,
+            secret: None,
             timeout: None,
             clients: Pool::new(),
             subscriptions: Pool::new(),
@@ -95,16 +99,24 @@ impl MqttTransport {
     }
 
     /// What a client on `side` presents when connecting: the configured
-    /// client identifier, or the one derived for that side, and the login.
-    #[must_use]
-    pub fn credentials(&self, side: Side) -> Credentials {
-        Credentials {
+    /// client identifier, or the one derived for that side, and the login,
+    /// its password the Location's secret read now.
+    ///
+    /// # Errors
+    /// Where the Location's secret is not set, is no password, or could
+    /// not be read.
+    fn presented(&self, side: Side) -> Result<Presented> {
+        Ok(Presented {
             client_id: self
                 .client_id
                 .clone()
                 .unwrap_or_else(|| client_id::derived(side, &self.broker, &self.topic)),
-            login: self.login.clone(),
-        }
+            login: self
+                .login
+                .as_ref()
+                .map(|login| transport::secured::logged_in(login, self.secret.as_ref(), "mqtt"))
+                .transpose()?,
+        })
     }
 
     /// Give up on a peer that stops mid-packet, and stop receiving when the
@@ -118,9 +130,10 @@ impl MqttTransport {
     /// Connect to the broker as a Send Location's client.
     ///
     /// # Errors
-    /// Where the broker refused or could not be reached.
+    /// Where the Location's secret could not be presented, or the broker
+    /// refused or could not be reached.
     pub fn connect(&self) -> Result<Client> {
-        Client::connect(&self.broker, &self.credentials(Side::Send), self.timeout)
+        Client::connect(&self.broker, &self.presented(Side::Send)?, self.timeout)
     }
 
     /// Bind as the far end clients connect to, and report the address.
@@ -184,7 +197,8 @@ impl Configured for MqttTransport {
                 name: "username",
                 kind: Kind::Text,
                 presence: Presence::Optional,
-                meaning: "The user name presented when connecting, its password the credentials'.",
+                meaning: "The user name presented when connecting, its password the Location's \
+                          secret.",
                 applies: Applies::Both,
             },
             Setting {
@@ -200,8 +214,8 @@ impl Configured for MqttTransport {
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["mqtt"];
 
-    /// The password is not a setting: it comes through the Location's
-    /// `credentials`, never its table.
+    /// The password is not a setting: it is the secret the Location names,
+    /// never its table; the login is built without it.
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let mut transport = Self::new(address, settings.text("topic"));
         if let Some(qos) = settings.optional_integer("qos") {
@@ -216,6 +230,22 @@ impl Configured for MqttTransport {
             Some(timeout) => transport.timing_out_after(timeout),
             None => transport,
         })
+    }
+
+    /// The password the Location's secret holds, beside its `username`,
+    /// read at each connection. MQTT 3.1.1 sends no password without a
+    /// user name (section 3.1.2.9), so a secret named without one is refused.
+    fn secured_by(mut self, secret: transport::Secured) -> Result<Self> {
+        if self.login.is_none() {
+            return Err(transport::TransportError::permanent(format!(
+                "the secret '{}' is presented as the password of the user the \"username\" \
+                 setting names, and none is named: MQTT 3.1.1 sends no password without a \
+                 user name",
+                secret.name()
+            )));
+        }
+        self.secret = Some(secret);
+        Ok(self)
     }
 }
 
@@ -252,7 +282,7 @@ impl Transport for MqttTransport {
             || {
                 let mut client = Client::connect_keeping_session(
                     &self.broker,
-                    &self.credentials(Side::Receive),
+                    &self.presented(Side::Receive)?,
                     self.timeout,
                 )?;
                 client.subscribe(&self.topic, self.qos)?;
@@ -292,7 +322,7 @@ impl Transport for MqttTransport {
         let (broker, topic) = self.resolve(target);
         self.clients.exchange(
             broker,
-            || Client::connect(broker, &self.credentials(Side::Send), self.timeout),
+            || Client::connect(broker, &self.presented(Side::Send)?, self.timeout),
             |client| client.publish(topic, bytes, self.qos),
         )
     }
@@ -391,7 +421,10 @@ mod tests {
         assert_eq!(built.broker, "broker:1883");
         assert_eq!(built.topic, "plant/+/temperature");
         assert_eq!(built.qos, 0);
-        assert_eq!(built.credentials(Side::Receive).client_id, "line-4");
+        assert_eq!(
+            built.presented(Side::Receive).expect("presented").client_id,
+            "line-4"
+        );
         assert_eq!(built.timeout, Some(secs(5)));
         let Err(refused) = MqttTransport::open("broker:1883", Applies::Send, &given[1..]) else {
             panic!("topic is required");
@@ -400,7 +433,7 @@ mod tests {
         let derived =
             MqttTransport::open("broker:1883", Applies::Send, &given[..1]).expect("built");
         assert_eq!(
-            derived.credentials(Side::Send).client_id,
+            derived.presented(Side::Send).expect("presented").client_id,
             client_id::derived(Side::Send, "broker:1883", "plant/+/temperature")
         );
     }
@@ -593,8 +626,10 @@ mod tests {
 
     #[test]
     fn a_receive_keeps_the_session_its_client_id_names() {
-        let named = MqttTransport::new("127.0.0.1:0", "probe").credentials(Side::Receive);
-        for (credentials, clean) in [(named, false), (Credentials::default(), true)] {
+        let named = MqttTransport::new("127.0.0.1:0", "probe")
+            .presented(Side::Receive)
+            .expect("presented");
+        for (presented, clean) in [(named, false), (Presented::default(), true)] {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let address = listener.local_addr().expect("address").to_string();
             let connected = std::thread::spawn(move || {
@@ -602,11 +637,11 @@ mod tests {
                 packet::read(&mut stream).expect("read").expect("CONNECT")
             });
             // The far end closes without CONNACK: only the CONNECT is read.
-            let _ = Client::connect_keeping_session(&address, &credentials, Some(secs(1)));
+            let _ = Client::connect_keeping_session(&address, &presented, Some(secs(1)));
             let Packet::Connect { clean_session, .. } = connected.join().expect("thread") else {
                 panic!("not a CONNECT");
             };
-            assert_eq!(clean_session, clean, "{:?}", credentials.client_id);
+            assert_eq!(clean_session, clean, "{:?}", presented.client_id);
         }
     }
 
@@ -652,6 +687,175 @@ mod tests {
             let arrived = loopback.round(&payload).expect(name);
             assert!(arrived.bytes == payload, "{name} came back changed");
         }
+    }
+
+    #[test]
+    fn the_password_is_the_locations_secret_read_at_each_connection() {
+        use transport::secured::Kept;
+        use xcore::SecretKind;
+        let kept = std::sync::Arc::new(Kept::default());
+        let far_end = MqttTransport::new("127.0.0.1:0", "probe").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = located(&address, Applies::Send, Some("party"))
+            .secured_by(kept.secured("partner-x.mqtt"))
+            .expect("kept");
+        let refused = near.send("sensor/1", b"none").expect_err("not set");
+        assert!(
+            refused.message.contains("'partner-x.mqtt' is not set"),
+            "{refused}"
+        );
+        assert!(!refused.retryable, "{refused}");
+        listener.set_nonblocking(true).expect("nonblocking");
+        assert_eq!(
+            listener.accept().err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WouldBlock),
+            "refused before connecting"
+        );
+        listener.set_nonblocking(false).expect("blocking");
+
+        let first = Kept::drawn();
+        kept.set("partner-x.mqtt", SecretKind::Password, &first);
+        // Each session closed after the publishes it takes.
+        let far_end = std::thread::spawn(move || {
+            [2, 1].map(|publishes| {
+                let mut session = far_end.accept_one(&listener).expect("accepting");
+                let login = session.login().cloned();
+                let taken = (0..publishes)
+                    .map(|_| session.next_publish().expect("publish").expect("one").bytes)
+                    .collect::<Vec<_>>();
+                (login, taken)
+            })
+        });
+        near.send("sensor/1", b"one").expect("set now");
+        // A kept connection does not read it again for each Message.
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----";
+        kept.set("partner-x.mqtt", SecretKind::Key, key);
+        near.send("sensor/1", b"two")
+            .expect("on the kept connection");
+        // The far end closed it: the next connection reads it again.
+        let wrong = near.send("sensor/1", b"three").expect_err("a key");
+        assert!(
+            wrong
+                .message
+                .contains("is a key, and mqtt presents a password"),
+            "{wrong}"
+        );
+        let second = Kept::drawn();
+        assert_ne!(first, second);
+        kept.set("partner-x.mqtt", SecretKind::Password, &second);
+        near.send("sensor/1", b"four").expect("replaced");
+        assert_eq!(
+            far_end.join().expect("thread"),
+            [
+                (
+                    Some(Login::new("party", first)),
+                    vec![b"one".to_vec(), b"two".to_vec()]
+                ),
+                (Some(Login::new("party", second)), vec![b"four".to_vec()]),
+            ]
+        );
+        assert_eq!(near.clients.opened(), 2);
+    }
+
+    #[test]
+    fn a_receive_presents_the_secret_and_without_one_the_user_name_goes_alone() {
+        use transport::secured::Kept;
+        let kept = std::sync::Arc::new(Kept::default());
+        let drawn = Kept::drawn();
+        kept.set("partner-x.mqtt", xcore::SecretKind::Password, &drawn);
+        let subscribed = Some(Event::Subscribed(vec!["probe".to_string()]));
+        let receiving = presents(|address| {
+            let near = located(address, Applies::Receive, Some("party"))
+                .secured_by(kept.secured("partner-x.mqtt"))
+                .expect("kept");
+            let _ = near.receive();
+        });
+        assert_eq!(
+            receiving,
+            (Some(Login::new("party", drawn)), subscribed.clone())
+        );
+        let alone = presents(|address| {
+            let _ = located(address, Applies::Send, Some("party")).connect();
+        });
+        assert_eq!(alone.0, Some(Login::new("party", "")));
+        let nobody = presents(|address| {
+            let _ = located(address, Applies::Receive, None).receive();
+        });
+        assert_eq!(nobody, (None, subscribed));
+    }
+
+    #[test]
+    fn a_session_refuses_a_password_it_cannot_keep() {
+        for (username, password) in [
+            (None, Some(b"alone".to_vec())),
+            (Some("party".to_string()), Some(vec![0xff, 0xfe])),
+        ] {
+            let far_end = MqttTransport::new("127.0.0.1:0", "probe").timing_out_after(secs(2));
+            let (listener, address) = far_end.bind().expect("binding");
+            let connecting = std::thread::spawn(move || {
+                let mut stream = std::net::TcpStream::connect(address).expect("connect");
+                let connect = packet::encode(&Packet::Connect {
+                    client_id: "device".to_string(),
+                    clean_session: true,
+                    username,
+                    password,
+                    keep_alive: 0,
+                })
+                .expect("encode");
+                std::io::Write::write_all(&mut stream, &connect).expect("write");
+                stream
+            });
+            let Err(refused) = far_end.accept_one(&listener) else {
+                panic!("accepted a password it cannot keep");
+            };
+            assert!(!refused.retryable, "{refused}");
+            assert!(refused.message.contains("password"), "{refused}");
+            drop(connecting.join().expect("thread"));
+        }
+    }
+
+    #[test]
+    fn a_secret_named_without_a_user_name_is_refused() {
+        let kept = std::sync::Arc::new(transport::secured::Kept::default());
+        let refused = located("broker:1883", Applies::Send, None)
+            .secured_by(kept.secured("partner-x.mqtt"))
+            .err()
+            .expect("no user name");
+        assert!(!refused.retryable, "{refused}");
+        assert!(
+            refused.message.contains("'partner-x.mqtt'")
+                && refused.message.contains("\"username\""),
+            "{refused}"
+        );
+    }
+
+    /// A Location of `address` on `side`, its topic `probe`, logging in as
+    /// `username` where one is given.
+    fn located(address: &str, side: Applies, username: Option<&str>) -> MqttTransport {
+        use xcore::settings::Given;
+        let mut given = vec![
+            ("topic".to_string(), Given::Text("probe".to_string())),
+            ("timeout".to_string(), Given::Text("2s".to_string())),
+        ];
+        if let Some(user) = username {
+            given.push(("username".to_string(), Given::Text(user.to_string())));
+        }
+        MqttTransport::open(address, side, &given).expect("built")
+    }
+
+    /// The login the client `connecting` makes to a far end at the address
+    /// it is given presents, as the far end's session keeps it, and what
+    /// the client did next; the session is closed after that.
+    fn presents(connecting: impl FnOnce(&str)) -> (Option<Login>, Option<Event>) {
+        let far_end = MqttTransport::new("127.0.0.1:0", "probe").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let serving = std::thread::spawn(move || {
+            let mut session = far_end.accept_one(&listener).expect("accepting");
+            let login = session.login().cloned();
+            (login, session.next_event().ok().flatten())
+        });
+        connecting(&address);
+        serving.join().expect("thread")
     }
 
     fn secs(n: u64) -> Duration {

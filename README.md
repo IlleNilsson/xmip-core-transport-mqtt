@@ -4,7 +4,9 @@ MQTT transport: one PUBLISH is one Stream, the topic beside it; a Location subsc
 
 A packet's remaining length may say up to 256 MiB; what a peer says is held to the 64 MiB Xmip reads in one body (`net::MAX_BODY`, through `net::ceiling::within`) before any of it is allocated.
 
-A Send Location publishes on a client connected once per broker and kept (`transport::Pool`), CONNECT asking for no keep-alive; a client the broker closed is replaced and the publish goes again. The login is the transport capability's `Login`, beside the client identifier in `Credentials`. Until 2026-09-27 every publish connected and disconnected.
+A Send Location publishes on a client connected once per broker and kept (`transport::Pool`), CONNECT asking for no keep-alive; a client the broker closed is replaced and the publish goes again. The login is the transport capability's `Login`, beside the client identifier in `Presented`. Until 2026-09-27 every publish connected and disconnected.
+
+A Location that logs in names its user in the `username` setting and its password with `secret = "<name>"`: the Location's secret, presented through `transport::secured::logged_in` and read each time a client connects — a send's publisher, a receive's subscription, and each one that replaces a client the broker closed — never for each publish on a kept one. MQTT 3.1.1 sends no password without a user name (section 3.1.2.9), so a Location that names a secret and no `username` is refused as the node starts. On the accepting side, `Session::login` is the login a client's CONNECT carried, password included, for what authenticates it; the session itself checks nothing. A CONNECT with a password and no user name, or a password that is not UTF-8 text, is refused.
 
 A Receive Location subscribes once: its first receive connects and subscribes, and the subscription stays attached between receives, so what the broker delivers meanwhile waits in the socket for the next; each receive takes what came until the broker is quiet for the timeout (`transport::pool::delivered`). A subscription the broker closed is replaced. Until 2026-09-28 every receive connected and subscribed anew.
 

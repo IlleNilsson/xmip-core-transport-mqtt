@@ -10,9 +10,9 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-use transport::Taken;
 use transport::error::{Result, classify, protocol_error};
 use transport::socket;
+use transport::{Login, Taken};
 
 use crate::packet::{Packet, Publish, encode, read};
 
@@ -32,6 +32,7 @@ pub struct Session {
     stream: TcpStream,
     peer: SocketAddr,
     client_id: String,
+    login: Option<Login>,
     subscribed: Vec<String>,
 }
 
@@ -39,18 +40,27 @@ impl Session {
     /// Accept one client on `listener` and complete its CONNECT.
     ///
     /// # Errors
-    /// Where the connection could not be accepted or the client did not
-    /// open with CONNECT.
+    /// Where the connection could not be accepted, the client did not
+    /// open with CONNECT, or its password is not text.
     pub fn accept(listener: &TcpListener, timeout: Option<Duration>) -> Result<Self> {
         let (stream, peer) = socket::accept_tcp(listener, timeout)?;
         let mut session = Self {
             stream,
             peer,
             client_id: String::new(),
+            login: None,
             subscribed: Vec::new(),
         };
         match read(&mut session.stream)? {
-            Some(Packet::Connect { client_id, .. }) => session.client_id = client_id,
+            Some(Packet::Connect {
+                client_id,
+                username,
+                password,
+                ..
+            }) => {
+                session.client_id = client_id;
+                session.login = carried(username, password)?;
+            }
             _ => return Err(protocol_error("the client did not open with CONNECT")),
         }
         session.write(&Packet::ConnAck {
@@ -64,6 +74,14 @@ impl Session {
     #[must_use]
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// The login the client's CONNECT carried: its user name, and its
+    /// password, empty where it sent none. `None` where it named no user.
+    /// Nothing here checks it.
+    #[must_use]
+    pub const fn login(&self) -> Option<&Login> {
+        self.login.as_ref()
     }
 
     /// The filters the client subscribed to so far.
@@ -156,4 +174,17 @@ impl Session {
             .flush()
             .map_err(|e| classify("flushing a packet", &e))
     }
+}
+
+/// The login a CONNECT's `username` and `password` make. A password is
+/// text to Xmip, as the secret it is held to is; one that is not UTF-8
+/// is refused rather than changed. A password without a user name never
+/// gets here: [`read`] refuses that CONNECT.
+fn carried(username: Option<String>, password: Option<Vec<u8>>) -> Result<Option<Login>> {
+    let Some(user) = username else {
+        return Ok(None);
+    };
+    let password = String::from_utf8(password.unwrap_or_default())
+        .map_err(|_| protocol_error("a CONNECT whose password is not UTF-8 text"))?;
+    Ok(Some(Login::new(user, password)))
 }

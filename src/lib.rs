@@ -46,6 +46,7 @@ pub use packet::{Packet, Publish};
 pub use session::{Event, Session};
 use transport::ArrivalIdentity;
 use transport::Configured;
+use transport::destination;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -151,16 +152,6 @@ impl MqttTransport {
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Session> {
         Session::accept(listener, self.timeout)
     }
-
-    /// Where a target names the broker and topic itself —
-    /// `mqtt://host:1883/a/b` — or is a topic alone on this transport's broker.
-    fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match Target::under(Self::SCHEMES, target).map(|named| (named.authority(), named.path())) {
-            Some((peer, "")) => (peer, &self.topic),
-            Some(pair) => pair,
-            None => (&self.broker, target),
-        }
-    }
 }
 
 impl Configured for MqttTransport {
@@ -213,6 +204,11 @@ impl Configured for MqttTransport {
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["mqtt"];
+
+    /// The topic setting: the address names only the broker.
+    fn own_target(_address: &str) -> &str {
+        destination::OWN
+    }
 
     /// The password is not a setting: it is the secret the Location names,
     /// never its table; the login is built without it.
@@ -316,10 +312,13 @@ impl Transport for MqttTransport {
     }
 
     /// Publish on the client kept for the broker, connected on the first
-    /// send to it.
+    /// send to it: to the broker and topic the target names —
+    /// `mqtt://host:1883/a/b` — or a topic alone on this transport's broker,
+    /// or empty and this transport's topic (`destination::on_server`).
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;
-        let (broker, topic) = self.resolve(target);
+        let named = Target::under(Self::SCHEMES, target);
+        let (broker, topic) = destination::on_server(target, named, (&self.broker, &self.topic));
         self.clients.exchange(
             broker,
             || Client::connect(broker, &self.presented(Side::Send)?, self.timeout),
@@ -457,6 +456,37 @@ mod tests {
         let second = session.next_publish().expect("second").expect("one");
         assert!(second.origin_uri.ends_with("/sensor/2?qos=1"));
         assert_eq!(second.bytes, [] as [u8; 0]);
+        sender.join().expect("thread").expect("sending");
+    }
+
+    #[test]
+    fn a_send_location_publishes_to_its_topic_and_a_target_naming_another_wins() {
+        use xcore::settings::Given;
+        let far_end = MqttTransport::new("127.0.0.1:0", "probe").timing_out_after(secs(2));
+        let (listener, address) = far_end.bind().expect("binding");
+        let location = format!("mqtt://{address}");
+        let sender = std::thread::spawn(move || {
+            let given = [
+                ("topic".to_string(), Given::Text("plant/4".to_string())),
+                ("timeout".to_string(), Given::Text("2s".to_string())),
+            ];
+            let near = MqttTransport::open(&location, Applies::Send, &given)?;
+            near.send(MqttTransport::own_target(&location), b"own")?;
+            near.send("plant/5", b"other")
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        let own = session.next_publish().expect("own").expect("one");
+        assert!(
+            own.origin_uri.ends_with("/plant/4?qos=1"),
+            "{}",
+            own.origin_uri
+        );
+        let other = session.next_publish().expect("other").expect("one");
+        assert!(
+            other.origin_uri.ends_with("/plant/5?qos=1"),
+            "{}",
+            other.origin_uri
+        );
         sender.join().expect("thread").expect("sending");
     }
 

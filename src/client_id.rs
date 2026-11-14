@@ -18,7 +18,7 @@
 //! read from a Location's name. A Location that sets `client_id` presents
 //! that instead, on the side it is configured for.
 
-use sha2::{Digest, Sha256};
+use codec::digest::Sha256;
 
 /// Which side of a Location a client serves.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,7 +41,7 @@ pub fn derived(side: Side, broker: &str, topic: &str) -> String {
     hash.update(broker.as_bytes());
     hash.update(b"\n");
     hash.update(topic.as_bytes());
-    let digest = hash.finalize();
+    let digest = hash.finish();
     let side = match side {
         Side::Receive => 'r',
         Side::Send => 's',

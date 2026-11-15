@@ -120,14 +120,6 @@ impl MqttTransport {
         })
     }
 
-    /// Give up on a peer that stops mid-packet, and stop receiving when the
-    /// broker has been quiet this long.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Connect to the broker as a Send Location's client.
     ///
     /// # Errors
@@ -192,13 +184,11 @@ impl Configured for MqttTransport {
                           secret.",
                 applies: Applies::Both,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-packet is waited on, and a quiet broker.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a peer that stops mid-packet is waited on, and a quiet broker.",
+            ),
         ],
     };
 
@@ -208,6 +198,10 @@ impl Configured for MqttTransport {
     /// The topic setting: the address names only the broker.
     fn own_target(_address: &str) -> &str {
         destination::OWN
+    }
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
     }
 
     /// The password is not a setting: it is the secret the Location names,
@@ -222,10 +216,7 @@ impl Configured for MqttTransport {
         transport.login = settings
             .optional_text("username")
             .map(|user| Login::new(user, ""));
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+        Ok(transport)
     }
 
     /// The password the Location's secret holds, beside its `username`,

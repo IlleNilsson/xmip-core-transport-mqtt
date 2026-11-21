@@ -725,7 +725,10 @@ mod tests {
             refused.message.contains("'partner-x.mqtt' is not set"),
             "{refused}"
         );
-        assert!(!refused.retryable, "{refused}");
+        assert!(
+            refused.retryable,
+            "asked again at the next connection: {refused}"
+        );
         listener.set_nonblocking(true).expect("nonblocking");
         assert_eq!(
             listener.accept().err().map(|error| error.kind()),

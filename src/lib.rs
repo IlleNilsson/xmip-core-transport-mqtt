@@ -224,12 +224,7 @@ impl Configured for MqttTransport {
     /// user name (section 3.1.2.9), so a secret named without one is refused.
     fn secured_by(mut self, secret: transport::Secured) -> Result<Self> {
         if self.login.is_none() {
-            return Err(transport::TransportError::permanent(format!(
-                "the secret '{}' is presented as the password of the user the \"username\" \
-                 setting names, and none is named: MQTT 3.1.1 sends no password without a \
-                 user name",
-                secret.name()
-            )));
+            return Err(transport::secured::without_user(&secret, "username"));
         }
         self.secret = Some(secret);
         Ok(self)

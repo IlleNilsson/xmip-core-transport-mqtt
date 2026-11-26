@@ -30,31 +30,52 @@
 //!
 //! The origin URI carries what the packet knew:
 //! `mqtt://broker/topic?qos=1`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod client;
+#[cfg(feature = "default")]
 pub mod client_id;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod packet;
+#[cfg(feature = "default")]
 pub mod session;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 pub use client::{Client, Presented};
+#[cfg(feature = "default")]
 use client_id::Side;
+#[cfg(feature = "default")]
 use net::Target;
+#[cfg(feature = "default")]
 pub use packet::{Packet, Publish};
+#[cfg(feature = "default")]
 pub use session::{Event, Session};
-use transport::ArrivalIdentity;
-use transport::Configured;
-use transport::destination;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::{Accepting, Listening};
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::pool::delivered;
-use transport::socket;
+#[cfg(feature = "default")]
 use transport::{Acknowledgement, Arrived, Directions, Login, Pool, Taken, Transport, Verdict};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, Configured, destination, pool::delivered, socket};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct MqttTransport {
     broker: String,
@@ -75,6 +96,7 @@ pub struct MqttTransport {
     subscriptions: Pool<Client>,
 }
 
+#[cfg(feature = "default")]
 impl MqttTransport {
     /// Speak to the broker at `broker` about `topic`.
     #[must_use]
@@ -146,54 +168,10 @@ impl MqttTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for MqttTransport {
-    /// The address is the broker, `host:1883`, both sides connect to.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "topic",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "What a Receive Location subscribes to, or a Send Location publishes to.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "qos",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 1,
-                },
-                presence: Presence::Optional,
-                meaning: "The quality of service published and subscribed at; 1 when left out.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "client_id",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The client identifier this Location presents; derived from the \
-                          broker address, the topic and the side when left out.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "username",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The user name presented when connecting, its password the Location's \
-                          secret.",
-                applies: Applies::Both,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a peer that stops mid-packet is waited on, and a quiet broker.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["mqtt"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     /// The topic setting: the address names only the broker.
     fn own_target(_address: &str) -> &str {
@@ -231,6 +209,7 @@ impl Configured for MqttTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for MqttTransport {
     fn name(&self) -> &'static str {
         "mqtt"
@@ -324,6 +303,7 @@ impl Transport for MqttTransport {
 /// to its kept session, which the next receive does. A packet identifier
 /// names a delivery on one connection only, so the answer goes on the kept
 /// subscription or not at all.
+#[cfg(feature = "default")]
 fn answering(subscriptions: &Pool<Client>, broker: &str, id: u16) -> Acknowledgement {
     let subscriptions = subscriptions.clone();
     let broker = broker.to_string();
@@ -343,6 +323,7 @@ fn answering(subscriptions: &Pool<Client>, broker: &str, id: u16) -> Acknowledge
     })
 }
 
+#[cfg(feature = "default")]
 impl MqttTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout, one topic called `probe`.
@@ -352,6 +333,7 @@ impl MqttTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Accepting for MqttTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut session = self.accept_one(listener)?;
@@ -361,6 +343,7 @@ impl Accepting for MqttTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for MqttTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(
@@ -388,6 +371,7 @@ mod tests {
     use super::*;
     use std::assert_matches;
     use transport::payload::{edge_payloads, sized_payloads};
+    use xcore::settings::Applies;
 
     #[test]
     fn mqtt_declares_its_settings_and_reads_through_them() {

@@ -18,6 +18,10 @@ A send target is read by `net::Target` in [xmip-core-library-net](https://github
 
 A Send Location publishes to the topic its `topic` setting names, on the broker its address names: it sends to the empty target (`Configured::own_target`, `transport::destination::OWN`), which `transport::destination::on_server` reads as that topic. A target naming another still wins — `plant/5`, or `mqtt://host:1883/plant/5` (ADR-0064, amendment 2026-11-10).
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `topic`, `qos`, `client_id`, `username` and `timeout`, and `SCHEMES`, `mqtt`. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code and every crate the code is built on are behind the default feature. So the library the surfaces load can carry it without the code, for the language server and the desktop to suggest and check an MQTT Location's settings though no node in their process loaded the technology, once the gathering crate of open problem 48 links it. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
